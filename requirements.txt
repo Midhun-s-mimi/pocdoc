@@ -8,5 +8,6 @@ pypdf
 python-docx
 Pillow
 streamlit-mic-recorder>=0.0.8
-google-api-core
 bcrypt
+requests
+streamlit-mic-recorder

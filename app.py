@@ -1,147 +1,114 @@
-import os
-import io
-import json
 import streamlit as st
-from dotenv import load_dotenv
-from groq import Groq
 from streamlit_mic_recorder import mic_recorder
-import requests
-from email_utils import send_emergency_email
+from auth_utils import register_user, login_user
 
-load_dotenv()
-st.set_page_config(page_title="Medical Assistant - Input", page_icon="🏥")
+st.set_page_config(page_title="Medical Assistant - Auth", page_icon="🏥", layout="centered")
 
-# Initialize Groq Client
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+st.title("🏥 Medical Assistant")
+st.markdown("### Secure Health Consultation Portal")
 
-st.title("🏥 Medical Assistant - Patient Intake")
-st.write("Please provide your details. You can type or use your voice.")
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
 
-col1, col2 = st.columns([1, 1])
+if st.session_state.authenticated:
+    st.switch_page("pages/chat.py")
+    st.stop()
 
-with col1:
+tab1, tab2 = st.tabs(["🔑 Login", "📝 Sign Up"])
+
+with tab1:
+    st.subheader("Welcome Back")
+    login_email = st.text_input("Email Address", key="login_email")
+    login_password = st.text_input("Password", type="password", key="login_password")
+    
+    if st.button("Login", type="primary", use_container_width=True):
+        if login_email and login_password:
+            success, profile, message = login_user(login_email, login_password)
+            if success:
+                st.session_state.authenticated = True
+                st.session_state.user_profile = profile
+                st.success(message)
+                st.switch_page("pages/chat.py")
+            else:
+                st.error(message)
+        else:
+            st.warning("Please fill in all fields.")
+
+with tab2:
+    st.subheader("Create an Account")
+    col1, col2 = st.columns(2)
+Recordewith col1:
     st.subheader("🎤 Voice or Text Input")
     
-    # Use the stable, native Streamlit mic recorder
+    # Initialize session state to hold the audio and text
+    if "recorded_audio_bytes" not in st.session_state:
+        st.session_state.recorded_audio_bytes = None
+    if "transcribed_text" not in st.session_state:
+        st.session_state.transcribed_text = ""
+    if "symptoms_text" not in st.session_state:
+        st.session_state.symptoms_text = ""
+
+    # 1. Voice r Component
     audio_state = mic_recorder(
-        start_prompt="🎙️ Start Recording",
-        stop_prompt="⏹️ Stop & Transcribe",
-        key="native_recorder"
+        start_prompt="🎙️ Start Recording (Tamil/English)",
+        stop_prompt="⏹️ Stop",
+        key="recorder"
     )
     
-    # Process the recorded audio
+    # 2. Process Audio when recording stops
     if audio_state:
-        with st.spinner("🔄 Transcribing audio..."):
+        # Save the audio bytes so we can play it back
+        st.session_state.recorded_audio_bytes = audio_state["bytes"]
+        
+        with st.spinner("Transcribing audio..."):
             try:
-                # ✅ CRITICAL FIXES APPLIED HERE:
-                # 1. Wrapped in io.BytesIO() so Groq can read the stream
-                # 2. ZERO trailing spaces in any string
-                # 3. language="ta" locks it to Tamil to prevent "hello everyone" hallucinations
                 transcription = groq_client.audio.transcriptions.create(
-                    file=("audio.webm", io.BytesIO(audio_state["bytes"]), "audio/webm"),
+                    file=("audio.webm", audio_state["bytes"], "audio/webm"),
                     model="whisper-large-v3",
-                    response_format="text",
-                    language="ta"  # Change to "en" if you are testing in English
+                    response_format="text"
                 )
+                # Update the text state with the transcription
+                st.session_state.transcribed_text = transcription
+                st.session_state.symptoms_text = transcription 
                 st.success("✅ Transcription successful!")
-                st.session_state["transcribed_text"] = transcription
             except Exception as e:
                 st.error(f"❌ Transcription failed: {e}")
 
-    # Text Input (pre-filled if voice was used)
-    default_text = st.session_state.get("transcribed_text", "")
+    # 3. Display the Audio Player (Audio Format)
+    if st.session_state.recorded_audio_bytes:
+        st.markdown("##### 🎧 Your Recording (Audio Format)")
+        st.audio(st.session_state.recorded_audio_bytes, format="audio/webm")
+        
+        # Optional: Add a button to clear the recording and text if they want to start over
+        if st.button("🗑️ Clear Recording & Text"):
+            st.session_state.recorded_audio_bytes = None
+            st.session_state.transcribed_text = ""
+            st.session_state.symptoms_text = ""
+            st.rerun()
+
+    # 4. Display the Text Box (Text Format)
+    st.markdown("##### 📝 Symptoms (Text Format)")
     symptoms = st.text_area(
-        "Describe your symptoms:", 
-        value=default_text, 
+        "Review the transcribed text or type manually:", 
+        value=st.session_state.symptoms_text, 
         height=150,
-        help="You can edit the transcribed text here if needed."
+        key="symptoms_input"
     )
-
-with col2:
-    st.subheader("📍 Patient Details & Location")
-    patient_name = st.text_input("Full Name")
-    age = st.text_input("Age")
-    gender = st.selectbox("Gender", ["Male", "Female", "Other"])
-    pain_level = st.slider("Pain Level (1-10)", 1, 10, 5)
-    days_suffering = st.number_input("Days suffering", min_value=0, max_value=365, value=1)
-    location = st.text_input(
-        "Your City or Pincode (e.g., 'Chennai' or '600001')", 
-        help="Used to find the nearest hospital in case of emergency."
-    )
-
-st.divider()
-
-if st.button("🔍 Analyze Symptoms & Proceed", type="primary"):
-    if not symptoms or not location or not patient_name:
-        st.warning("⚠️ Please fill in your name, location, and symptoms.")
-    else:
-        with st.spinner("🧠 Analyzing for critical conditions..."):
-            try:
-                triage_prompt = f"""
-Act as a medical triage nurse. Analyze these symptoms: "{symptoms}".
-Respond ONLY in valid JSON format with two keys:
-- "is_critical": boolean (true if symptoms indicate a medical emergency)
-- "reason": string (brief explanation)
-"""
-                response = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[{"role": "user", "content": triage_prompt}],
-                    response_format={"type": "json_object"}
-                )
-                
-                triage_result = json.loads(response.choices[0].message.content)
-                is_critical = triage_result.get("is_critical", False)
-                reason = triage_result.get("reason", "")
-
-                if is_critical:
-                    st.error(f"⚠️ **CRITICAL ALERT**: {reason}")
-                    st.warning("Your symptoms require immediate medical attention.")
-                    
-                    consent = st.checkbox("✅ I consent to sharing my details with a nearby hospital for emergency assistance.")
-                    
-                    if consent:
-                        with st.spinner("📍 Locating nearest hospital and sending alert..."):
-                            try:
-                                headers = {'User-Agent': 'MedicalAssistantApp/1.0'}
-                                url = f"https://nominatim.openstreetmap.org/search?format=json&q=hospital+near+{location}&limit=1"
-                                geo_response = requests.get(url, headers=headers).json()
-                                
-                                if geo_response:
-                                    hospital_name = geo_response[0].get("display_name", "Local Hospital")
-                                    hospital_address = geo_response[0].get("display_name", "Address unavailable")
-                                else:
-                                    hospital_name = "Nearest Regional Hospital"
-                                    hospital_address = location
-
-                                success, msg = send_emergency_email(
-                                    patient_name, symptoms, location, hospital_name, hospital_address
-                                )
-                                
-                                if success:
-                                    st.success(f"✅ Emergency alert sent to: {hospital_name}")
-                                else:
-                                    st.error(f"❌ Email failed: {msg}. Please call 108 immediately.")
-                            except Exception as e:
-                                st.error(f"❌ Location lookup failed: {e}. Please call 108 immediately.")
-                    else:
-                        st.info("Alert not sent. Please seek medical help manually.")
-                else:
-                    st.success(f"✅ **Non-Critical**: {reason}")
-                    st.info("Proceeding to detailed consultation...")
-
-                # Save to session state for the chat page
-                st.session_state.patient_data = {
-                    "age": age, 
-                    "gender": gender, 
-                    "symptoms": symptoms,
-                    "days_suffering": days_suffering, 
-                    "pain_level": pain_level,
-                    "location": location, 
-                    "report_text": "", 
-                    "report_image_bytes": None
-                }
-                
-                st.switch_page("pages/chat.py")
-
-            except Exception as e:
-                st.error(f"❌ Analysis failed: {e}")
+    
+    # Keep the session state updated with whatever the user types/edits in the box
+    st.session_state.symptoms_text = symptoms
+    with col2:
+        reg_age = st.text_input("Age", key="reg_age")
+        reg_gender = st.selectbox("Gender", ["Male", "Female", "Other", "Prefer not to say"], key="reg_gender")
+        reg_location = st.text_input("City or Location", key="reg_location")
+    
+    if st.button("Sign Up", type="primary", use_container_width=True):
+        if all([reg_name, reg_email, reg_password, reg_age, reg_gender, reg_location]):
+            success, message = register_user(reg_name, reg_email, reg_password, reg_age, reg_gender, reg_location)
+            if success:
+                st.success(message)
+                st.info("Please switch to the Login tab.")
+            else:
+                st.error(message)
+        else:
+            st.warning("Please fill in all fields.")

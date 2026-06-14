@@ -9,11 +9,9 @@ MAX_TEXT_CHARS = 8000
 def extract_file_content(uploaded_file) -> dict:
     mime_type = uploaded_file.type or mimetypes.guess_type(uploaded_file.name)[0] or ""
     file_bytes = uploaded_file.read()
-    # ✅ FIX: Removed all trailing spaces in dictionary keys
     result = {"text": "", "image_bytes": None, "mime_type": mime_type, "is_image": False}
     
     try:
-        # ✅ FIX: Removed space in "pdf "
         if "pdf" in mime_type:
             reader = PdfReader(io.BytesIO(file_bytes))
             text = "\n".join(page.extract_text() or "" for page in reader.pages)
