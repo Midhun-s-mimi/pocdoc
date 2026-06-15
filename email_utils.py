@@ -7,38 +7,41 @@ def send_emergency_email(patient_name, symptoms, location, hospital_name, hospit
     sender_email = os.getenv("SENDER_EMAIL")
     sender_password = os.getenv("SENDER_APP_PASSWORD")
     
-    # Fallback if the dynamic email is somehow empty
-    if not receiver_email or receiver_email == "hospital.emergency@example.com":
-        receiver_email = os.getenv("DEFAULT_EMERGENCY_EMAIL", "regional.dispatch@example.com")
+    # 🚨 TESTING OVERRIDE: Force the email to go to YOUR inbox instead of the hospital's
+    # We use the DEFAULT_EMERGENCY_EMAIL from your .env file
+    forced_receiver = os.getenv("DEFAULT_EMERGENCY_EMAIL", sender_email)
+    
+    print(f"🚨 DEBUG: Bypassing hospital email ({receiver_email}) and sending to: {forced_receiver}")
 
-    subject = f"🚨 URGENT: Critical Patient Alert - {patient_name}"
-    body = f"""
-    URGENT MEDICAL ALERT
+    subject = f"Medical Alert: {patient_name}"
 
-    A patient has reported critical symptoms and consented to share their details.
+    body = f"""Medical Assistant Alert
 
-    Patient Name: {patient_name}
-    Location: {location}
-    Reported Symptoms: {symptoms}
+A patient has reported critical symptoms.
 
-    Nearest Identified Facility: {hospital_name}
-    Facility Address: {hospital_address}
+Patient Name: {patient_name}
+Location: {location}
+Reported Symptoms: {symptoms}
 
-    Please prepare for potential intake or provide immediate tele-guidance.
-    """
+Nearest Identified Facility: {hospital_name}
+Facility Address: {hospital_address}
+
+Please prepare for potential intake.
+"""
 
     msg = MIMEMultipart()
-    msg['From'] = sender_email
-    msg['To'] = receiver_email
+    msg['From'] = f"Medical Assistant <{sender_email}>"
+    msg['To'] = forced_receiver
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
 
     try:
         server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.ehlo()
         server.starttls()
         server.login(sender_email, sender_password)
         server.send_message(msg)
         server.quit()
-        return True, f"Emergency email sent successfully to {receiver_email}."
+        return True, f"Email sent to {forced_receiver}."
     except Exception as e:
-        return False, f"Failed to send email: {str(e)}"
+        return False, f"Failed: {str(e)}"

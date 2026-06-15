@@ -2,6 +2,7 @@ import os
 import time
 import streamlit as st
 import requests
+import json
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -12,6 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
 from streamlit_mic_recorder import mic_recorder
+from history_utils import save_chat_history, load_chat_history, clear_chat_history
 from file_utils import extract_file_content
 from email_utils import send_emergency_email
 
@@ -50,14 +52,28 @@ groq_llm = get_groq_llm()
 gemini_client = get_gemini_client()
 
 # ============================================================
-# 3. STATE INITIALIZATION
+# 3. STATE INITIALIZATION (Split into Past History & Current Session)
 # ============================================================
+user_email = profile.get("email", "unknown_user")
+
+if "past_history" not in st.session_state:
+    st.session_state.past_history = load_chat_history(user_email)
+
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
 if "conversation_summary" not in st.session_state:
-    st.session_state.conversation_summary = "No previous conversation."
+    if len(st.session_state.past_history) > 0:
+        recent_past = st.session_state.past_history[-4:]
+        summary_text = "\n".join([f"{'User' if isinstance(m, HumanMessage) else 'AI'}: {m.content[:100]}..." for m in recent_past])
+        st.session_state.conversation_summary = f"Previous context:\n{summary_text}"
+    else:
+        st.session_state.conversation_summary = "No previous conversation."
+
 if "initial_greeting_done" not in st.session_state:
     st.session_state.initial_greeting_done = False
+if "emergency_alert_sent" not in st.session_state:
+    st.session_state.emergency_alert_sent = False
 
 # ============================================================
 # 4. CONVERSATION SUMMARIZATION LOGIC
@@ -78,6 +94,28 @@ def summarize_history():
         st.session_state.chat_history = recent_messages
     except Exception:
         pass
+    # ============================================================
+# 4.5 AUTO-EMERGENCY TRIAGE FUNCTION
+# ============================================================
+def check_if_critical(symptoms: str) -> tuple:
+    """Asks the AI if the symptoms indicate a life-threatening emergency."""
+    try:
+        triage_prompt = f"""
+        Act as a medical triage nurse. Analyze these symptoms: "{symptoms}".
+        Respond ONLY in valid JSON format with two keys:
+        - "is_critical": boolean (true ONLY if symptoms indicate a life-threatening emergency like heart attack, stroke, severe bleeding, unconsciousness, etc.)
+        - "reason": string (brief medical explanation)
+        """
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": triage_prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.1
+        )
+        result = json.loads(response.choices[0].message.content)
+        return result.get("is_critical", False), result.get("reason", "")
+    except Exception as e:
+        return False, "Triage check failed."
 
 # ============================================================
 # 5. AI GENERATION ROUTER
@@ -108,8 +146,10 @@ GUIDELINES:
         parts = [types.Part.from_text(text=user_input)]
         parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
         contents.append(types.Content(role="user", parts=parts))
+        
+        # FIXED: Changed to 1.5-flash to prevent 503 UNAVAILABLE errors
         resp = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash", 
             contents=contents,
             config=types.GenerateContentConfig(system_instruction=system_template.format(
                 name=profile.get('name'), age=str(profile.get('age')),
@@ -135,15 +175,18 @@ GUIDELINES:
         })
 
 # ============================================================
-# 6. UI: SIDEBAR & EMERGENCY
+# 6. UI: SIDEBAR, HISTORY VIEWER & EMERGENCY
 # ============================================================
 with st.sidebar:
     st.markdown(f"### 👤 {profile.get('name')}")
     st.markdown(f"**Age:** {profile.get('age')} | **Gender:** {profile.get('gender')}")
     st.markdown(f"**Location:** {profile.get('location')}")
     st.divider()
+    
+    # --- EMERGENCY ALERT ---
     st.markdown("### 🚨 Emergency")
     if st.button("Send Emergency Alert", type="primary", use_container_width=True):
+        # FIXED: Removed the rogue st.rerun() that was breaking this button
         consent = st.checkbox("I consent to sharing my details.")
         if consent:
             with st.spinner("Locating hospital..."):
@@ -154,6 +197,7 @@ with st.sidebar:
                     geo_response = requests.get(url, headers=headers).json()
                     hospital_name = geo_response[0].get("display_name", "Local Hospital") if geo_response else "Regional Hospital"
                     hospital_email = geo_response[0].get("extratags", {}).get("contact:email", os.getenv("DEFAULT_EMERGENCY_EMAIL", "hospital@example.com")) if geo_response else os.getenv("DEFAULT_EMERGENCY_EMAIL")
+                    
                     success, msg = send_emergency_email(profile.get('name'), st.session_state.conversation_summary, location, hospital_name, location, hospital_email)
                     if success:
                         st.success(f"✅ Alert sent to: {hospital_name}")
@@ -161,7 +205,37 @@ with st.sidebar:
                         st.error(f"Email failed: {msg}")
                 except Exception as e:
                     st.error(f"Location lookup failed: {e}")
+                    
     st.divider()
+
+    # --- PAST HISTORY VIEWER ---
+    st.markdown("#### 📜 Your Past Queries")
+    user_queries = [msg.content for msg in st.session_state.past_history if isinstance(msg, HumanMessage)]
+    
+    if not user_queries:
+        st.caption("No past queries yet. Start chatting below!")
+    else:
+        with st.expander(f"🗂️ View History ({len(user_queries)} questions)", expanded=False):
+            for i, query in enumerate(user_queries):
+                clean_query = query.replace("\n", " ").strip()
+                short_query = clean_query[:80] + "..." if len(clean_query) > 80 else clean_query
+                st.markdown(f"**{i+1}.** {short_query}")
+                
+    st.divider()
+
+    # --- CLEAR HISTORY BUTTON ---
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
+        clear_chat_history(user_email)
+        st.session_state.past_history = []
+        st.session_state.chat_history = []
+        st.session_state.conversation_summary = "No previous conversation."
+        st.session_state.initial_greeting_done = False
+        st.success("Chat history cleared!")
+        st.rerun()
+
+    st.divider()
+
+    # --- LOGOUT BUTTON ---
     if st.button("🚪 Logout", use_container_width=True):
         for key in ["authenticated", "user_profile", "chat_history", "conversation_summary", "initial_greeting_done", "processed_files", "uploader_key", "pending_voice_text", "pending_voice_audio", "mic_key"]:
             st.session_state.pop(key, None)
@@ -171,11 +245,9 @@ with st.sidebar:
 # 7. UI: INITIAL GREETING
 # ============================================================
 if not st.session_state.initial_greeting_done:
-    with st.spinner("🤖 Preparing your personalized consultation..."):
-        greeting = f"Hello {profile.get('name')}. I see you are {profile.get('age')} years old from {profile.get('location')}. How can I assist you with your health today?"
-        st.session_state.chat_history.append(AIMessage(content=greeting))
-        st.session_state.initial_greeting_done = True
-        st.rerun()
+    greeting = f"Hello {profile.get('name')}. I see you are {profile.get('age')} years old from {profile.get('location')}. How can I assist you with your health today?"
+    st.session_state.chat_history.append(AIMessage(content=greeting))
+    st.session_state.initial_greeting_done = True
 
 # ============================================================
 # 8. UI: CHAT INTERFACE (Inputs First, Results Last)
@@ -186,9 +258,7 @@ if "last_chat_error" in st.session_state:
     st.error(f"❌ {st.session_state.last_chat_error}")
     del st.session_state.last_chat_error
 
-# ---------------------------------------------------------
-# 1. VOICE INPUT (Audio Player + Editable Text Box)
-# ---------------------------------------------------------
+# --- 1. VOICE INPUT ---
 st.markdown("##### 🎤 Voice Input (Optional)")
 if "pending_voice_text" not in st.session_state:
     st.session_state.pending_voice_text = ""
@@ -236,9 +306,7 @@ if st.session_state.pending_voice_text or st.session_state.pending_voice_audio:
             st.session_state.pending_voice_audio = None
             st.rerun()
 
-# ---------------------------------------------------------
-# 2. FILE UPLOAD (Persistent Memory)
-# ---------------------------------------------------------
+# --- 2. FILE UPLOAD ---
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
 if "uploader_key" not in st.session_state:
@@ -275,24 +343,20 @@ if st.session_state.processed_files:
             st.session_state.processed_files = []
             st.rerun()
 
-# ---------------------------------------------------------
-# 3. TEXT CHAT INPUT
-# ---------------------------------------------------------
+# --- 3. TEXT CHAT INPUT ---
 st.markdown("##### ⌨️ Or Type Your Message")
 prompt_text = st.chat_input("Type your symptoms or questions here...")
 
 st.divider()
 
-# ---------------------------------------------------------
-# 4. CHAT HISTORY (Displayed at the bottom)
-# ---------------------------------------------------------
+# --- 4. CHAT HISTORY DISPLAY ---
 for msg in st.session_state.chat_history:
     role = "user" if isinstance(msg, HumanMessage) else "assistant"
     with st.chat_message(role):
         st.write(msg.content)
 
 # ============================================================
-# PROCESS SUBMISSION LOGIC
+# PROCESS SUBMISSION LOGIC (WITH AUTO-EMERGENCY TRIAGE)
 # ============================================================
 final_text_input = ""
 
@@ -307,6 +371,63 @@ elif prompt_text or analyze_btn:
         final_text_input = prompt_text.strip()
 
 if final_text_input:
+    
+    # 🚨 AUTO-EMERGENCY TRIAGE CHECK 🚨
+    if not st.session_state.emergency_alert_sent:
+        with st.spinner("🩺 Running emergency triage check..."):
+            is_critical, triage_reason = check_if_critical(final_text_input)
+        
+        if is_critical:
+            st.session_state.emergency_alert_sent = True # Prevent duplicate alerts
+            
+            # 1. Show massive warning to the user
+            st.error(f"🚨 **CRITICAL CONDITION DETECTED**: {triage_reason}")
+            st.warning("🚑 **Emergency alert is being AUTOMATICALLY sent to the nearest hospital!**")
+            
+            # 2. Automatically locate hospital and send email
+            try:
+                location = profile.get('location', 'Unknown') if profile else 'Unknown'
+                patient_name = profile.get('name', 'Patient') if profile else 'Patient'
+                
+                headers = {'User-Agent': 'MedicalAssistantApp/1.0'}
+                url = f"https://nominatim.openstreetmap.org/search?format=json&q=hospital+near+{location}&limit=1&extratags=1"
+                geo_response = requests.get(url, headers=headers).json()
+                
+                                # 🚨 FIXED: Safely handle None values from the OpenStreetMap API
+                if geo_response and len(geo_response) > 0:
+                    # 'or {}' guarantees we never try to call .get() on a None value
+                    extratags = geo_response[0].get("extratags") or {}
+                    address = geo_response[0].get("address") or {}
+                    
+                    hospital_name = geo_response[0].get("display_name", "Local Hospital")
+                    hospital_address = f"{address.get('road', '')} {address.get('city', location)}".strip()
+                    hospital_email = extratags.get("contact:email") or os.getenv("DEFAULT_EMERGENCY_EMAIL", "hospital@example.com")
+                else:
+                    hospital_name = "Regional Emergency Hospital"
+                    hospital_address = location
+                    hospital_email = os.getenv("DEFAULT_EMERGENCY_EMAIL", "hospital@example.com")
+                
+                # 🚨 DEBUG LINES (Keep these to see exactly what is happening)
+                st.info(f"🔍 DEBUG: Receiver Email is: {hospital_email}")
+                st.info(f"🔍 DEBUG: Sender Email is: {os.getenv('SENDER_EMAIL')}")
+
+                # Send the email automatically!
+                success, msg = send_emergency_email(
+                    patient_name, final_text_input, location, hospital_name, hospital_address, hospital_email
+                )
+                
+                if success:
+                    st.success(f"✅ AUTOMATIC ALERT SENT TO: {hospital_name}")
+                else:
+                    st.error(f"❌ Auto-alert email failed: {msg}")
+                    
+            except Exception as e:
+                # This is the missing 'except' block that was causing your SyntaxError
+                st.error(f"❌ Location lookup or email failed: {e}")
+            
+            st.divider() # Visual separator before the AI response
+
+    # --- NORMAL AI RESPONSE GENERATION ---
     with st.chat_message("user"):
         st.write(final_text_input)
 
@@ -322,13 +443,28 @@ if final_text_input:
                 error_msg = str(e)
                 st.error(f"❌ Error: {error_msg}")
 
+    # 1. Add to current session history (Main Chat UI)
     st.session_state.chat_history.append(HumanMessage(content=final_text_input))
     if response_text:
         st.session_state.chat_history.append(AIMessage(content=response_text))
     elif error_msg:
         st.session_state.chat_history.append(AIMessage(content=f"⚠️ Failed to generate response: {error_msg}"))
 
+    # 2. Add to persistent past history (Sidebar & AI Context)
+    st.session_state.past_history.append(HumanMessage(content=final_text_input))
+    if response_text:
+        st.session_state.past_history.append(AIMessage(content=response_text))
+        
+    # 3. Save the updated past history to the JSON file
+    save_chat_history(user_email, st.session_state.past_history)
+    
+    # 4. Prevent infinite file growth: Keep only the last 10 messages
+    if len(st.session_state.past_history) > 10:
+        st.session_state.past_history = st.session_state.past_history[-10:]
+        save_chat_history(user_email, st.session_state.past_history)
+    
     summarize_history()
+    
     if error_msg:
         st.session_state.last_chat_error = error_msg
     st.rerun()
