@@ -175,41 +175,21 @@ GUIDELINES:
         })
 
 # ============================================================
-# 6. UI: SIDEBAR, HISTORY VIEWER & EMERGENCY
+# 6. UI: SIDEBAR & HISTORY VIEWER
 # ============================================================
 with st.sidebar:
-    st.markdown(f"### 👤 {profile.get('name')}")
+    st.markdown("### 👤 User Profile")
+    st.markdown(f"**Name:**  {profile.get('name')}")
     st.markdown(f"**Age:** {profile.get('age')} | **Gender:** {profile.get('gender')}")
     st.markdown(f"**Location:** {profile.get('location')}")
     st.divider()
-    
-    # --- EMERGENCY ALERT ---
-    st.markdown("### 🚨 Emergency")
-    if st.button("Send Emergency Alert", type="primary", use_container_width=True):
-        # FIXED: Removed the rogue st.rerun() that was breaking this button
-        consent = st.checkbox("I consent to sharing my details.")
-        if consent:
-            with st.spinner("Locating hospital..."):
-                try:
-                    location = profile.get('location', '')
-                    headers = {'User-Agent': 'MedicalAssistantApp/1.0'}
-                    url = f"https://nominatim.openstreetmap.org/search?format=json&q=hospital+near+{location}&limit=1&extratags=1"
-                    geo_response = requests.get(url, headers=headers).json()
-                    hospital_name = geo_response[0].get("display_name", "Local Hospital") if geo_response else "Regional Hospital"
-                    hospital_email = geo_response[0].get("extratags", {}).get("contact:email", os.getenv("DEFAULT_EMERGENCY_EMAIL", "hospital@example.com")) if geo_response else os.getenv("DEFAULT_EMERGENCY_EMAIL")
-                    
-                    success, msg = send_emergency_email(profile.get('name'), st.session_state.conversation_summary, location, hospital_name, location, hospital_email)
-                    if success:
-                        st.success(f"✅ Alert sent to: {hospital_name}")
-                    else:
-                        st.error(f"Email failed: {msg}")
-                except Exception as e:
-                    st.error(f"Location lookup failed: {e}")
-                    
-    st.divider()
 
-    # --- PAST HISTORY VIEWER ---
+    # ==========================================
+    # 📜 PAST HISTORY VIEWER
+    # ==========================================
     st.markdown("#### 📜 Your Past Queries")
+    
+    # Extract only the messages sent by the user from the PAST history
     user_queries = [msg.content for msg in st.session_state.past_history if isinstance(msg, HumanMessage)]
     
     if not user_queries:
@@ -237,7 +217,8 @@ with st.sidebar:
 
     # --- LOGOUT BUTTON ---
     if st.button("🚪 Logout", use_container_width=True):
-        for key in ["authenticated", "user_profile", "chat_history", "conversation_summary", "initial_greeting_done", "processed_files", "uploader_key", "pending_voice_text", "pending_voice_audio", "mic_key"]:
+        # Added 'emergency_alert_sent' to the cleanup list just in case
+        for key in ["authenticated", "user_profile", "chat_history", "conversation_summary", "initial_greeting_done", "processed_files", "uploader_key", "pending_voice_text", "pending_voice_audio", "mic_key", "emergency_alert_sent"]:
             st.session_state.pop(key, None)
         st.switch_page("app.py")
 

@@ -10,3 +10,4 @@ python-docx
 Pillow
 streamlit-mic-recorder
 requests
+pymongo

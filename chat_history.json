@@ -1,1 +1,12 @@
-{}
+{
+    "midhunaids@gmail.com": [
+        {
+            "role": "user",
+            "content": "Please analyze the attached files and provide a summary of the medical findings."
+        },
+        {
+            "role": "assistant",
+            "content": "Hello Midhun,\n\nI have analyzed the attached medical certificate. Please note that this certificate is for **Satish Chand Gupta**, born on February 6, 2003, from Kelanpur, Gujarat, and not for you.\n\nHere is a summary of the medical findings for Satish Chand Gupta:\n\n*   **Initial Consultation:** On September 15, 2024, Satish presented with symptoms of viral fever and cold. The consulting physician, Dr. Akshit Mayur, recommended one week of bed rest starting from September 16, 2024.\n*   **Follow-up Consultation:** On September 22, 2024, during a follow-up appointment, it was observed that Satish was still not fully recovered. To prevent the risk of infection to others, an additional day of bed rest was prescribed, advising him to remain at home until Tuesday, September 24, 2024.\n*   **Recommendations:** Satish was advised to continue bed rest until September 24, 2024, and to consult the doctor again if symptoms persist.\n\nDisclaimer: I am an AI, not a substitute for professional medical advice."
+        }
+    ]
+}
